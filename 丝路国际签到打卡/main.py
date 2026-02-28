@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-丝路国际签到打卡脚本
+name: 丝路国际签到打卡脚本
 环境变量配置：
 SLGJ_USER: phone=手机号&password=密码
 cron: 0,10 9 * * *
@@ -9,7 +9,6 @@ cron: 0,10 9 * * *
 说明：
   - 脚本通过一个环境变量`SLGJ_USER`获取账号信息。
   - 格式为`phone=手机号&password=密码`，会自动拆解为手机号码和密码。
-  - 兼容`YH_USERNAME`/`YH_PASSWORD`将不再使用。
 """
 import os
 import sys
