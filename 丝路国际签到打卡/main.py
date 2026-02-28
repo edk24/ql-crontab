@@ -67,6 +67,87 @@ def send_notification(title: str, content: str):
     except Exception as e:
         logger.error(f"发送通知失败: {e}")
 
+def get_available_domain() -> str:
+    """获取可用的域名（主函数中使用）"""
+    logger.info("开始获取可用域名...")
+    
+    # 创建临时session用于获取域名
+    temp_session = requests.Session()
+    base_headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Html5Plus/1.0 (Immersed/59) uni-app',
+        'Accept-Language': 'zh-CN,zh-Hans;q=0.9',
+        'appVersion': '1.0.2.0',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept': '*/*',
+        'Connection': 'keep-alive'
+    }
+    
+    timestamp = int(time.time() * 1000)
+    url = f"https://silugj-1322772389.cos.accelerate.myqcloud.com/yydsslgj.json?t={timestamp}"
+    logger.debug(f"请求域名接口: {url}")
+    
+    domain_list = []
+    try:
+        response = temp_session.get(
+            url,
+            headers=base_headers,
+            timeout=10,
+            verify=False
+        )
+        logger.info(f"域名接口响应状态: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            logger.debug(f"域名接口返回数据: {json.dumps(data, ensure_ascii=False)}")
+            key_list = data.get('keyList', '')
+            if key_list:
+                domain_list = [d.strip() for d in key_list.split(',') if d.strip()]
+                logger.info(f"成功获取域名列表: {domain_list}")
+    except Exception as e:
+        logger.error(f"获取域名过程异常: {str(e)}", exc_info=True)
+    
+    # 尝试找到可用的域名
+    def _is_domain_alive(domain: str) -> bool:
+        try:
+            test_url = domain.rstrip('/') + "/app/sn-personal/insurance/user/login"
+            resp = temp_session.options(
+                test_url,
+                headers=base_headers,
+                timeout=5,
+                verify=False
+            )
+            return resp.status_code < 500
+        except Exception:
+            return False
+    
+    # 从获取的列表中挑选第一个可用的域名
+    random.shuffle(domain_list)
+    for dom in domain_list:
+        if _is_domain_alive(dom):
+            logger.info(f"选择可用域名: {dom}")
+            return dom
+        else:
+            logger.warning(f"域名不可用，跳过: {dom}")
+    
+    # 如果上面的都不可用，使用备用域名
+    backup_domains = [
+        "https://api.ockw6.com",
+        "https://api.skw68.com",
+        "https://api.yinhehapi.com"
+    ]
+    logger.info(f"尝试备用域名列表: {backup_domains}")
+    random.shuffle(backup_domains)
+    for dom in backup_domains:
+        if _is_domain_alive(dom):
+            logger.info(f"备用域名可用: {dom}")
+            return dom
+        else:
+            logger.warning(f"备用域名不可用: {dom}")
+    
+    # 最后一手段，返回第一个原始域名或备选
+    fallback = domain_list[0] if domain_list else backup_domains[0]
+    logger.warning(f"未找到可用域名，使用回退: {fallback}")
+    return fallback
+
 def parse_multiple_accounts(user_env: str) -> List[Dict[str, str]]:
     """
     解析多个账户信息
@@ -148,7 +229,7 @@ def format_table(headers: List[str], rows: List[List[str]]) -> str:
     return "\n".join(table)
 
 class YHCheckIn:
-    def __init__(self, phone: str, password: str):
+    def __init__(self, phone: str, password: str, base_url: str = ""):
         # 直接使用传入的爲证信息
         self.username = phone.strip()
         self.password = password.strip()
@@ -173,7 +254,7 @@ class YHCheckIn:
             'Connection': 'keep-alive'
         }
         
-        self.base_url = ""
+        self.base_url = base_url  # 使用传入的域名
         self.user_info = {}
         self.token = ""
         self.domain_list = []
@@ -268,8 +349,10 @@ class YHCheckIn:
         """登录账号"""
         try:
             if not self.base_url:
-                self.base_url = self.get_random_domain()
-                logger.info(f"最终使用域名: {self.base_url}")
+                logger.error("错误: 未指定基础URL")
+                self.check_in_result['status'] = '失败'
+                self.check_in_result['message'] = '未指定基础URL'
+                return False
             
             login_url = f"{self.base_url}/app/sn-personal/insurance/user/login"
             logger.info(f"登录URL: {login_url}")
@@ -337,23 +420,37 @@ class YHCheckIn:
                             return True
                         else:
                             logger.error("登录失败: 未获取到token")
+                            self.check_in_result['status'] = '失败'
+                            self.check_in_result['message'] = '未获取到token'
                     else:
                         logger.error(f"登录失败: 代码={code}, 消息={message}")
+                        self.check_in_result['status'] = '失败'
+                        self.check_in_result['message'] = message
                 except json.JSONDecodeError as e:
                     logger.error(f"解析登录响应JSON失败: {e}")
                     logger.debug(f"响应内容: {response.text}")
+                    self.check_in_result['status'] = '异常'
+                    self.check_in_result['message'] = f"JSON解析失败: {e}"
             else:
                 logger.error(f"登录请求失败: HTTP {response.status_code}")
                 logger.debug(f"响应内容: {response.text}")
+                self.check_in_result['status'] = '失败'
+                self.check_in_result['message'] = f"HTTP {response.status_code}"
                 
             return False
             
         except requests.exceptions.Timeout:
             logger.error("登录请求超时")
+            self.check_in_result['status'] = '异常'
+            self.check_in_result['message'] = '请求超时'
         except requests.exceptions.ConnectionError:
             logger.error("登录连接错误")
+            self.check_in_result['status'] = '异常'
+            self.check_in_result['message'] = '连接错误'
         except Exception as e:
             logger.error(f"登录过程异常: {str(e)}", exc_info=True)
+            self.check_in_result['status'] = '异常'
+            self.check_in_result['message'] = str(e)
         return False
     
     def get_user_wallet_balance(self) -> Dict[str, Any]:
@@ -530,19 +627,6 @@ class YHCheckIn:
                         self.check_in_result['message'] = detail_msg
                         self.check_in_result['balance'] = new_balance
                         
-                        # 发送通知
-                        notification_content = (
-                            f"用户: {self.user_info.get('nickName', '未知')}\n"
-                            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            f"结果: {detail_msg}\n"
-                            f"当前余额: ¥{new_balance:.2f}\n"
-                            f"域名: {self.base_url}"
-                        )
-                        
-                        if self.check_in_result['increase'] > 0:
-                            notification_content += f"\n🎊 本次增加: ¥{self.check_in_result['increase']:.2f}"
-                        
-                        send_notification("🎉 签到成功", notification_content)
                         return True
                     else:
                         error_msg = f"签到失败: 代码={code}, 消息={message}"
@@ -552,36 +636,33 @@ class YHCheckIn:
                         self.check_in_result['status'] = '失败'
                         self.check_in_result['message'] = f"{message} (代码: {code})"
                         
-                        # 发送失败通知
-                        send_notification(
-                            "❌ 签到失败",
-                            f"用户: {self.user_info.get('nickName', '未知')}\n"
-                            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            f"原因: {message} (代码: {code})\n"
-                            f"当前余额: ¥{self.balance_info.get('cnyWithdrawableBalance', 0):.2f}"
-                        )
                 except json.JSONDecodeError as e:
                     logger.error(f"解析签到响应JSON失败: {e}")
                     logger.debug(f"响应内容: {response.text}")
-                    send_notification("❌ 签到异常", f"解析响应失败: {e}")
+                    self.check_in_result['status'] = '异常'
+                    self.check_in_result['message'] = f"JSON解析失败"
             else:
                 error_msg = f"签到请求失败: HTTP {response.status_code}"
                 logger.error(error_msg)
                 logger.debug(f"响应内容: {response.text}")
-                send_notification("❌ 签到失败", error_msg)
+                self.check_in_result['status'] = '失败'
+                self.check_in_result['message'] = f"HTTP {response.status_code}"
                 
             return False
             
         except requests.exceptions.Timeout:
             logger.error("签到请求超时")
-            send_notification("❌ 签到超时", "请求超时，请稍后重试")
+            self.check_in_result['status'] = '异常'
+            self.check_in_result['message'] = '请求超时'
         except requests.exceptions.ConnectionError:
             logger.error("签到连接错误")
-            send_notification("❌ 连接错误", "网络连接失败")
+            self.check_in_result['status'] = '异常'
+            self.check_in_result['message'] = '连接错误'
         except Exception as e:
             error_msg = f"签到过程异常: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            send_notification("❌ 签到异常", error_msg)
+            self.check_in_result['status'] = '异常'
+            self.check_in_result['message'] = str(e)
         return False
     
     def run(self) -> Dict[str, Any]:
@@ -595,8 +676,8 @@ class YHCheckIn:
         logger.info("\n" + "📱" * 10 + " 开始登录 " + "📱" * 10)
         if not self.login():
             self.check_in_result['status'] = '失败'
-            self.check_in_result['message'] = '登录失败'
-            send_notification("❌ 签到失败", "登录失败，请检查账号密码或网络")
+            if not self.check_in_result['message']:
+                self.check_in_result['message'] = '登录失败'
             return self.check_in_result
         
         # 步骤2: 获取签到前的余额
@@ -639,8 +720,6 @@ def main():
             logger.warning("    SLGJ_USER: phone=手机号&password=密码")
             logger.warning("    支持多账户: phone=号1&password=密码1&phone=号2&password=密码2")
             logger.warning("=" * 60)
-            
-            send_notification("配置错误", "请设置环境变量 SLGJ_USER")
             sys.exit(1)
         
         user_env = os.environ.get('SLGJ_USER', '').strip()
@@ -650,10 +729,18 @@ def main():
         
         if not accounts:
             logger.error("无法解析任何有效的账户信息")
-            send_notification("配置错误", "无法解析账户信息，请检查 SLGJ_USER 格式")
             sys.exit(1)
         
         logger.info(f"检测到 {len(accounts)} 个账户，开始处理...")
+        
+        # 先获取一次可用域名，所有账户共用
+        logger.info("\n" + "🌐" * 35)
+        logger.info("第一步：获取可用域名（全部账户共用）")
+        logger.info("🌐" * 35)
+        
+        available_domain = get_available_domain()
+        logger.info(f"✅ 获取到可用域名: {available_domain}")
+        logger.info("=" * 70)
         
         # 存储所有结果
         all_results = []
@@ -665,7 +752,8 @@ def main():
             logger.info("🔄" * 35)
             
             try:
-                checker = YHCheckIn(account['phone'], account['password'])
+                # 使用获取到的域名初始化账户检查器
+                checker = YHCheckIn(account['phone'], account['password'], available_domain)
                 result = checker.run()
                 all_results.append(result)
                 
@@ -681,12 +769,11 @@ def main():
                     'phone': account['phone'],
                     'nickname': '未知',
                     'status': '异常',
-                    'message': str(e),
+                    'message': str(e)[:50],
                     'balance': 0,
                     'increase': 0,
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 })
-                send_notification("❌ 账户처理异常", f"账户 {account['phone']} 处理异常: {str(e)}")
         
         # 生成结果表格
         print("\n" + "=" * 120)
@@ -716,12 +803,10 @@ def main():
         table_output = format_table(table_headers, table_data)
         print(table_output)
         
-        # 统计信息
+        # 统计信息（不含汇总金额）
         success_count = sum(1 for r in all_results if r['status'] == '成功')
         fail_count = sum(1 for r in all_results if r['status'] == '失败')
         error_count = sum(1 for r in all_results if r['status'] == '异常')
-        total_balance = sum(r['balance'] for r in all_results)
-        total_increase = sum(r['increase'] for r in all_results)
         
         print("\n" + "=" * 120)
         print("📊 执行统计")
@@ -730,25 +815,16 @@ def main():
         logger.info(f"成功: {success_count} ✅")
         logger.info(f"失败: {fail_count} ❌")
         logger.info(f"异常: {error_count} ⚠️")
-        logger.info(f"总余额: ¥{total_balance:.2f}")
-        logger.info(f"总增加: ¥{total_increase:.2f}")
         print("=" * 120)
         
-        # 发送统计通知
-        summary_msg = (
-            f"批量签到完成\n"
-            f"总数: {len(all_results)} | 成功: {success_count} | 失败: {fail_count} | 异常: {error_count}\n"
-            f"总余额: ¥{total_balance:.2f}\n"
-            f"总增加: ¥{total_increase:.2f}"
-        )
-        send_notification("📊 批量签到统计", summary_msg)
+        # 发送表格通知（表格内容包含所有详细信息）
+        notification_msg = f"批量签到完成\n\n总数: {len(all_results)} | 成功: {success_count} | 失败: {fail_count} | 异常: {error_count}\n\n{table_output}"
+        send_notification("📊 签到统计报告", notification_msg)
         
     except KeyboardInterrupt:
         logger.info("\n用户中断执行")
-        send_notification("脚本中断", "用户手动中断执行")
     except Exception as e:
         logger.error(f"程序执行异常: {str(e)}", exc_info=True)
-        send_notification("脚本异常", f"程序异常: {str(e)}")
         sys.exit(1)
 
 if __name__ == "__main__":
