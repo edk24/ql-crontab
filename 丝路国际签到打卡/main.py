@@ -18,7 +18,7 @@ import random
 import logging
 import requests
 import urllib3
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 
 # 禁用SSL警告和urllib3的警告
@@ -67,27 +67,96 @@ def send_notification(title: str, content: str):
     except Exception as e:
         logger.error(f"发送通知失败: {e}")
 
+def parse_multiple_accounts(user_env: str) -> List[Dict[str, str]]:
+    """
+    解析多个账户信息
+    支持格式: phone=1834804&password=Sl678&phone=15055&password=S78
+    """
+    accounts = []
+    try:
+        items = user_env.split('&')
+        account = {}
+        
+        for item in items:
+            if '=' not in item:
+                continue
+            
+            key, value = item.split('=', 1)
+            key = key.strip().lower()
+            value = value.strip()
+            
+            if key == 'phone':
+                # 如果已经有phone，说明开始新账户
+                if 'phone' in account and 'password' in account:
+                    accounts.append(account)
+                    account = {}
+                account['phone'] = value
+            elif key == 'password':
+                account['password'] = value
+        
+        # 添加最后一个账户
+        if 'phone' in account and 'password' in account:
+            accounts.append(account)
+        
+        # 验证
+        for i, acc in enumerate(accounts):
+            if not acc.get('phone') or not acc.get('password'):
+                logger.warning(f"第 {i+1} 个账户信息不完整，跳过")
+                accounts.remove(acc)
+        
+        logger.info(f"成功解析 {len(accounts)} 个账户")
+        return accounts
+        
+    except Exception as e:
+        logger.error(f"解析账户信息失败: {e}")
+        return []
+
+def format_table(headers: List[str], rows: List[List[str]]) -> str:
+    """
+    简单的表格格式化函数，不依赖外部库
+    """
+    # 计算每列的最大宽度
+    col_widths = []
+    for col_idx in range(len(headers)):
+        width = len(headers[col_idx])
+        for row in rows:
+            width = max(width, len(str(row[col_idx])))
+        col_widths.append(width)
+    
+    # 构建分隔线
+    separator = "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"
+    
+    # 构建表格
+    table = [separator]
+    
+    # 添加表头
+    header_row = "|"
+    for i, header in enumerate(headers):
+        header_row += f" {header:<{col_widths[i]}} |"
+    table.append(header_row)
+    table.append(separator)
+    
+    # 添加数据行
+    for row in rows:
+        data_row = "|"
+        for i, cell in enumerate(row):
+            data_row += f" {str(cell):<{col_widths[i]}} |"
+        table.append(data_row)
+    
+    table.append(separator)
+    
+    return "\n".join(table)
+
 class YHCheckIn:
-    def __init__(self):
-        # 获取环境变量并解析 (仅支持 SLGJ_USER)
-        user_env = os.environ.get('SLGJ_USER', '').strip()
-        self.username = ''
-        self.password = ''
-        if user_env:
-            try:
-                parts = dict(item.split('=', 1) for item in user_env.split('&') if '=' in item)
-                self.username = parts.get('phone', '').strip()
-                self.password = parts.get('password', '').strip()
-            except Exception:
-                logger.warning(f"无法解析 SLGJ_USER: {user_env}")
+    def __init__(self, phone: str, password: str):
+        # 直接使用传入的爲证信息
+        self.username = phone.strip()
+        self.password = password.strip()
         
         if not self.username or not self.password:
-            error_msg = (
-                "错误: 请设置环境变量 SLGJ_USER，格式 'phone=手机号&password=密码'"
-            )
+            error_msg = "错误: 账户信息不完整"
             logger.error(error_msg)
-            send_notification("签到失败", error_msg)
-            sys.exit(1)
+            raise ValueError(error_msg)
         
         logger.info(f"初始化签到脚本，用户: {self.username[:3]}****{self.username[-4:]}")
         
@@ -109,6 +178,15 @@ class YHCheckIn:
         self.token = ""
         self.domain_list = []
         self.balance_info = {}  # 存储余额信息
+        self.check_in_result = {  # 签到结果
+            'phone': self.username,
+            'nickname': '未知',
+            'status': '未开始',
+            'message': '',
+            'balance': 0,
+            'increase': 0,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
         
     def _is_domain_alive(self, domain: str) -> bool:
         """简单检测给定域名是否可用"""
@@ -443,8 +521,14 @@ class YHCheckIn:
                             increase = new_balance - old_balance
                             logger.info(f"💰 余额增加: ¥{increase:.2f}")
                             logger.info(f"💰 当前可提现余额: ¥{new_balance:.2f}")
+                            self.check_in_result['increase'] = increase
                         
                         logger.info("=" * 50)
+                        
+                        # 更新签到结果
+                        self.check_in_result['status'] = '成功'
+                        self.check_in_result['message'] = detail_msg
+                        self.check_in_result['balance'] = new_balance
                         
                         # 发送通知
                         notification_content = (
@@ -455,13 +539,18 @@ class YHCheckIn:
                             f"域名: {self.base_url}"
                         )
                         
-                        if new_balance > old_balance:
-                            notification_content += f"\n🎊 本次增加: ¥{increase:.2f}"
+                        if self.check_in_result['increase'] > 0:
+                            notification_content += f"\n🎊 本次增加: ¥{self.check_in_result['increase']:.2f}"
                         
                         send_notification("🎉 签到成功", notification_content)
                         return True
                     else:
-                        logger.error(f"签到失败: 代码={code}, 消息={message}")
+                        error_msg = f"签到失败: 代码={code}, 消息={message}"
+                        logger.error(error_msg)
+                        
+                        # 更新签到结果
+                        self.check_in_result['status'] = '失败'
+                        self.check_in_result['message'] = f"{message} (代码: {code})"
                         
                         # 发送失败通知
                         send_notification(
@@ -495,8 +584,8 @@ class YHCheckIn:
             send_notification("❌ 签到异常", error_msg)
         return False
     
-    def run(self):
-        """执行签到流程"""
+    def run(self) -> Dict[str, Any]:
+        """执行签到流程，返回结果"""
         print("=" * 70)
         logger.info(f"开始处理账号: {self.username[:3]}****{self.username[-4:]}")
         logger.info(f"当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -505,12 +594,16 @@ class YHCheckIn:
         # 步骤1: 登录
         logger.info("\n" + "📱" * 10 + " 开始登录 " + "📱" * 10)
         if not self.login():
+            self.check_in_result['status'] = '失败'
+            self.check_in_result['message'] = '登录失败'
             send_notification("❌ 签到失败", "登录失败，请检查账号密码或网络")
-            return
+            return self.check_in_result
         
         # 步骤2: 获取签到前的余额
         logger.info("\n" + "💰" * 10 + " 获取签到前余额 " + "💰" * 10)
         self.get_user_wallet_balance()
+        self.check_in_result['nickname'] = self.user_info.get('nickName', '未知')
+        self.check_in_result['balance'] = self.balance_info.get('cnyWithdrawableBalance', 0)
         
         # 步骤3: 签到
         logger.info("\n" + "✅" * 10 + " 开始签到 " + "✅" * 10)
@@ -526,31 +619,129 @@ class YHCheckIn:
         # 输出总结信息
         logger.info(f"\n📊 执行总结:")
         logger.info(f"  账号: {self.username[:3]}****{self.username[-4:]}")
-        logger.info(f"  昵称: {self.user_info.get('nickName', '未知')}")
+        logger.info(f"  昵称: {self.check_in_result['nickname']}")
         logger.info(f"  使用域名: {self.base_url}")
-        logger.info(f"  当前可提现余额: ¥{self.balance_info.get('cnyWithdrawableBalance', 0):.2f}")
-        logger.info(f"  执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"  签到结果: {'成功' if success else '失败'}")
+        logger.info(f"  当前可提现余额: ¥{self.check_in_result['balance']:.2f}")
+        logger.info(f"  执行时间: {self.check_in_result['timestamp']}")
+        logger.info(f"  签到结果: {self.check_in_result['status']}")
+        if self.check_in_result['message']:
+            logger.info(f"  详情: {self.check_in_result['message']}")
+        
+        return self.check_in_result
 
 def main():
-    """主函数"""
+    """主函数 - 支持多账户处理"""
     try:
         # 检查环境变量
         if 'SLGJ_USER' not in os.environ:
             logger.warning("=" * 60)
             logger.warning("⚠️  提示: 请在青龙面板环境变量中设置:")
             logger.warning("    SLGJ_USER: phone=手机号&password=密码")
+            logger.warning("    支持多账户: phone=号1&password=密码1&phone=号2&password=密码2")
             logger.warning("=" * 60)
-            
-            # 测试用，正式使用请注释掉
-            # os.environ['SLGJ_USER'] = 'phone=1831***48014&password=Sl***678'
             
             send_notification("配置错误", "请设置环境变量 SLGJ_USER")
             sys.exit(1)
         
-        # 创建实例并运行
-        checker = YHCheckIn()
-        checker.run()
+        user_env = os.environ.get('SLGJ_USER', '').strip()
+        
+        # 解析多个账户
+        accounts = parse_multiple_accounts(user_env)
+        
+        if not accounts:
+            logger.error("无法解析任何有效的账户信息")
+            send_notification("配置错误", "无法解析账户信息，请检查 SLGJ_USER 格式")
+            sys.exit(1)
+        
+        logger.info(f"检测到 {len(accounts)} 个账户，开始处理...")
+        
+        # 存储所有结果
+        all_results = []
+        
+        # 为每个账户执行签到
+        for idx, account in enumerate(accounts, 1):
+            logger.info("\n" + "🔄" * 35)
+            logger.info(f"处理账户 {idx}/{len(accounts)}: {account['phone'][:3]}****{account['phone'][-4:]}")
+            logger.info("🔄" * 35)
+            
+            try:
+                checker = YHCheckIn(account['phone'], account['password'])
+                result = checker.run()
+                all_results.append(result)
+                
+                # 账户间延迟，避免请求过快
+                if idx < len(accounts):
+                    delay = random.randint(3, 8)
+                    logger.info(f"等待 {delay} 秒后处理下一个账户...")
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                logger.error(f"处理第 {idx} 个账户失败: {str(e)}", exc_info=True)
+                all_results.append({
+                    'phone': account['phone'],
+                    'nickname': '未知',
+                    'status': '异常',
+                    'message': str(e),
+                    'balance': 0,
+                    'increase': 0,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                })
+                send_notification("❌ 账户처理异常", f"账户 {account['phone']} 处理异常: {str(e)}")
+        
+        # 生成结果表格
+        print("\n" + "=" * 120)
+        print("🎯 所有账户签到情况统计表")
+        print("=" * 120)
+        
+        # 准备表格数据
+        table_headers = ['序号', '手机号', '昵称', '状态', '余额(¥)', '增加(¥)', '详情']
+        table_data = []
+        
+        for idx, result in enumerate(all_results, 1):
+            phone = result['phone']
+            # 截断长消息以适应表格
+            detail = result['message'][:40] + ('...' if len(result['message']) > 40 else '')
+            
+            table_data.append([
+                str(idx),
+                f"{phone[:3]}****{phone[-4:]}",
+                result['nickname'][:10],  # 昵称不超过10个字符
+                result['status'],
+                f"¥{result['balance']:.2f}",
+                f"¥{result['increase']:.2f}",
+                detail
+            ])
+        
+        # 打印表格
+        table_output = format_table(table_headers, table_data)
+        print(table_output)
+        
+        # 统计信息
+        success_count = sum(1 for r in all_results if r['status'] == '成功')
+        fail_count = sum(1 for r in all_results if r['status'] == '失败')
+        error_count = sum(1 for r in all_results if r['status'] == '异常')
+        total_balance = sum(r['balance'] for r in all_results)
+        total_increase = sum(r['increase'] for r in all_results)
+        
+        print("\n" + "=" * 120)
+        print("📊 执行统计")
+        print("=" * 120)
+        logger.info(f"总账户数: {len(all_results)}")
+        logger.info(f"成功: {success_count} ✅")
+        logger.info(f"失败: {fail_count} ❌")
+        logger.info(f"异常: {error_count} ⚠️")
+        logger.info(f"总余额: ¥{total_balance:.2f}")
+        logger.info(f"总增加: ¥{total_increase:.2f}")
+        print("=" * 120)
+        
+        # 发送统计通知
+        summary_msg = (
+            f"批量签到完成\n"
+            f"总数: {len(all_results)} | 成功: {success_count} | 失败: {fail_count} | 异常: {error_count}\n"
+            f"总余额: ¥{total_balance:.2f}\n"
+            f"总增加: ¥{total_increase:.2f}"
+        )
+        send_notification("📊 批量签到统计", summary_msg)
         
     except KeyboardInterrupt:
         logger.info("\n用户中断执行")
