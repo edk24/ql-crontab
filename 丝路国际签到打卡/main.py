@@ -194,39 +194,19 @@ def parse_multiple_accounts(user_env: str) -> List[Dict[str, str]]:
 
 def format_table(headers: List[str], rows: List[List[str]]) -> str:
     """
-    简单的表格格式化函数，不依赖外部库
+    使用 Markdown 风格生成表格文字。
+    返回的字符串适合直接打印或用作通知内容。
     """
-    # 计算每列的最大宽度
-    col_widths = []
-    for col_idx in range(len(headers)):
-        width = len(headers[col_idx])
-        for row in rows:
-            width = max(width, len(str(row[col_idx])))
-        col_widths.append(width)
-    
-    # 构建分隔线
-    separator = "+" + "+".join("-" * (w + 2) for w in col_widths) + "+"
-    
-    # 构建表格
-    table = [separator]
-    
-    # 添加表头
-    header_row = "|"
-    for i, header in enumerate(headers):
-        header_row += f" {header:<{col_widths[i]}} |"
-    table.append(header_row)
-    table.append(separator)
-    
-    # 添加数据行
+    # 构建表头和分隔行
+    header_line = "| " + " | ".join(headers) + " |"
+    separator_line = "| " + " | ".join("---" for _ in headers) + " |"
+
+    # 构建数据行
+    data_lines = []
     for row in rows:
-        data_row = "|"
-        for i, cell in enumerate(row):
-            data_row += f" {str(cell):<{col_widths[i]}} |"
-        table.append(data_row)
-    
-    table.append(separator)
-    
-    return "\n".join(table)
+        data_lines.append("| " + " | ".join(str(cell) for cell in row) + " |")
+
+    return "\n".join([header_line, separator_line] + data_lines)
 
 class YHCheckIn:
     def __init__(self, phone: str, password: str, base_url: str = ""):
